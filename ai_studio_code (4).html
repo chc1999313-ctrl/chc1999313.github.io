@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>赛博金色圣诞树 (手势版)</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000; 
+            font-family: 'Segoe UI', sans-serif;
+            touch-action: none; 
+        }
+        #ui-container {
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            z-index: 100;
+            pointer-events: none;
+        }
+        .btn {
+            pointer-events: auto;
+            background: rgba(255, 215, 0, 0.2);
+            color: #ffd700;
+            border: 1px solid #ffd700;
+            padding: 10px 20px;
+            font-size: 14px;
+            border-radius: 30px;
+            cursor: pointer;
+            backdrop-filter: blur(5px);
+            box-shadow: 0 0 15px rgba(255, 215, 0, 0.3);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0 5px;
+            transition: 0.3s;
+        }
+        .btn:active, .btn.active {
+            background: #ffd700;
+            color: #000;
+            box-shadow: 0 0 25px rgba(255, 215, 0, 0.8);
+        }
+        #file-input { display: none; }
+        
+        /* 摄像头预览窗口 (可选显示，默认隐藏或者放角落) */
+        #camera-preview {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 100px;
+            height: 75px;
+            border-radius: 8px;
+            z-index: 90;
+            transform: scaleX(-1); /* 镜像 */
+            opacity: 0.7;
+            border: 1px solid #ffd700;
+            display: none; /* 点击开启后显示 */
+        }
+
+        .status-text {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 215, 0, 0.7);
+            font-size: 12px;
+            pointer-events: none;
+            line-height: 1.5;
+            text-shadow: 0 0 5px #000;
+        }
+        .loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ffd700;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="status-text" id="status">
+        ✨ 模式: 触屏/鼠标<br>
+        📷 点击下方"开启摄像头"启用手势<br>
+        🖐 张手/👌捏合: 变星球 | ☝️指天: 选照片
+    </div>
+
+    <div id="loading" class="loading">正在加载 AI 模型...</div>
+    
+    <video id="camera-preview" playsinline muted autoplay></video>
+
+    <div id="ui-container">
+        <input type="file" id="file-input" accept="image/*">
+        <button class="btn" id="cam-btn" onclick="toggleCamera()">📷 开启摄像头控制</button>
+        <button class="btn" onclick="document.getElementById('file-input').click()">🖼️ 添加照片</button>
+    </div>
+
+    <!-- 核心库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <!-- MediaPipe 手势识别库 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        // --- 1. 基础场景变量 ---
+        let scene, camera, renderer, controls;
+        let particles, particleGeo;
+        let ringGroup; // 装饰环
+        let photoGroup; // 照片组
+        let isPlanet = false; // 当前状态：树 还是 星球
+        let clock = new THREE.Clock();
+
+        // 粒子数据
+        const particleCount = 2000; // 粒子数量
+        const positionsTree = []; // 树形态坐标
+        const positionsPlanet = []; // 星球形态坐标
+        const currentPositions = []; // 当前坐标
+
+        // --- 2. 摄像头与手势变量 ---
+        let hands;
+        let cameraVideoElement;
+        let isCameraActive = false;
+        let lastPhotoTriggerTime = 0; // 防止手势重复触发
+
+        initThree();
+        animate();
+
+        // --- Three.js 初始化 ---
+        function initThree() {
+            scene = new THREE.Scene();
+            // 黑色背景 + 远处的金色雾气
+            scene.fog = new THREE.FogExp2(0x000000, 0.02);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 0, 25);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            document.body.appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.autoRotate = true;
+            controls.autoRotateSpeed = 0.5;
+
+            // 灯光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+            scene.add(ambientLight);
+            
+            // 金色点光源
+            const pLight = new THREE.PointLight(0xffd700, 1.5, 50);
+            pLight.position.set(5, 5, 5);
+            scene.add(pLight);
+            
+            // 蓝色背光 (增加赛博感)
+            const bLight = new THREE.PointLight(0x0088ff, 1, 50);
+            bLight.position.set(-5, -5, -5);
+            scene.add(bLight);
+
+            // 创建粒子系统
+            createParticles();
+            
+            // 创建装饰环
+            createRings();
+
+            // 照片组
+            photoGroup = new THREE.Group();
+            scene.add(photoGroup);
+
+            // 监听窗口
+            window.addEventListener('resize', onWindowResize, false);
+            // 监听上传
+            document.getElementById('file-input').addEventListener('change', handleFileUpload);
+        }
+
+        // --- 生成粒子与形态数据 ---
+        function createParticles() {
+            const geometry = new THREE.BufferGeometry();
+            const colors = [];
+            const sizes = [];
+
+            const treeHeight = 16;
+            const treeRadius = 6;
+            const planetRadius = 7;
+
+            for (let i = 0; i < particleCount; i++) {
+                // 1. 计算【圣诞树】形态坐标 (螺旋圆锥)
+                const t = i / particleCount;
+                const angle = t * 25; // 螺旋圈数
+                const radius = (1 - t) * treeRadius; 
+                const x1 = Math.cos(angle) * radius + (Math.random()-0.5);
+                const y1 = (t * treeHeight) - treeHeight/2;
+                const z1 = Math.sin(angle) * radius + (Math.random()-0.5);
+                
+                positionsTree.push(x1, y1, z1);
+
+                // 2. 计算【星球】形态坐标 (球体)
+                const phi = Math.acos(-1 + (2 * i) / particleCount);
+                const theta = Math.sqrt(particleCount * Math.PI) * phi;
+                const x2 = planetRadius * Math.cos(theta) * Math.sin(phi);
+                const y2 = planetRadius * Math.sin(theta) * Math.sin(phi);
+                const z2 = planetRadius * Math.cos(phi);
+
+                positionsPlanet.push(x2, y2, z2);
+
+                // 3. 初始化当前坐标 (默认是树)
+                currentPositions.push(x1, y1, z1);
+
+                // 颜色 (金色系: 金黄、白、橙)
+                const colorType = Math.random();
+                let c = new THREE.Color();
+                if(colorType > 0.8) c.setHex(0xffffff); // 白闪烁
+                else if (colorType > 0.3) c.setHex(0xffd700); // 纯金
+                else c.setHex(0xffaa00); // 深金/橙
+                
+                colors.push(c.r, c.g, c.b);
+                sizes.push(Math.random() * 0.5 + 0.1);
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(currentPositions, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+            // 材质
+            const material = new THREE.PointsMaterial({
+                size: 0.3,
+                vertexColors: true,
+                map: createSparkleTexture(),
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        function createRings() {
+            ringGroup = new THREE.Group();
+            scene.add(ringGroup);
+
+            // 创建几个金色光环
+            const createRing = (r, tiltX, tiltZ) => {
+                const geo = new THREE.TorusGeometry(r, 0.05, 16, 100);
+                const mat = new THREE.MeshBasicMaterial({ color: 0xffd700, transparent: true, opacity: 0.4 });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.rotation.x = tiltX;
+                mesh.rotation.z = tiltZ;
+                ringGroup.add(mesh);
+                return mesh;
+            };
+
+            createRing(7.5, 1.5, 0.2);
+            createRing(6.0, 2.0, -0.4);
+            createRing(8.5, 1.0, 0.5);
+        }
+
+        // --- 手势识别逻辑 (MediaPipe) ---
+        async function toggleCamera() {
+            if(isCameraActive) return;
+            const btn = document.getElementById('cam-btn');
+            const status = document.getElementById('status');
+            const preview = document.getElementById('camera-preview');
+            const loading = document.getElementById('loading');
+
+            loading.style.display = 'block';
+            status.innerHTML = "正在启动摄像头，请稍候...<br>(手机端请确保使用HTTPS协议)";
+
+            try {
+                cameraVideoElement = document.getElementById('camera-preview');
+                
+                hands = new Hands({locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }});
+
+                hands.setOptions({
+                    maxNumHands: 1,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+
+                hands.onResults(onHandsResults);
+
+                // 使用 CameraUtils 工具类
+                const cameraUtils = new Camera(cameraVideoElement, {
+                    onFrame: async () => {
+                        await hands.send({image: cameraVideoElement});
+                    },
+                    width: 640,
+                    height: 480
+                });
+
+                await cameraUtils.start();
+
+                isCameraActive = true;
+                loading.style.display = 'none';
+                preview.style.display = 'block';
+                btn.classList.add('active');
+                btn.innerText = "🔵 摄像头运行中";
+                status.innerHTML = "✋ 摄像头已接管!<br>🖐 张手/👌捏合: 变身星球<br>☝️ 食指向上: 添加照片";
+
+            } catch (error) {
+                console.error(error);
+                loading.style.display = 'none';
+                alert("摄像头启动失败！\n请检查浏览器权限，或确认链接是HTTPS开头。");
+                status.innerHTML = "❌ 摄像头启动失败";
+            }
+        }
+
+        function onHandsResults(results) {
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                // 没检测到手，慢慢变回树
+                isPlanet = false;
+                return;
+            }
+
+            const landmarks = results.multiHandLandmarks[0];
+            
+            // 简单的手势逻辑判断
+            
+            // 1. 判断是否张开手 (检测指尖和指根距离)
+            // 拇指(4), 食指(8), 中指(12), 无名指(16), 小指(20)
+            const isThumbOpen = landmarks[4].x < landmarks[3].x; // 简化判断
+            const isIndexOpen = landmarks[8].y < landmarks[6].y;
+            const isMiddleOpen = landmarks[12].y < landmarks[10].y;
+            const isRingOpen = landmarks[16].y < landmarks[14].y;
+            const isPinkyOpen = landmarks[20].y < landmarks[18].y;
+
+            const openFingersCount = [isIndexOpen, isMiddleOpen, isRingOpen, isPinkyOpen].filter(Boolean).length;
+
+            // 2. 检测 "食指指天" (只有食指伸出) -> 触发照片
+            if (isIndexOpen && !isMiddleOpen && !isRingOpen && !isPinkyOpen) {
+                const now = Date.now();
+                if (now - lastPhotoTriggerTime > 2000) { // 2秒防抖
+                    lastPhotoTriggerTime = now;
+                    // 视觉反馈
+                    const status = document.getElementById('status');
+                    const originalText = status.innerHTML;
+                    status.style.color = "#fff";
+                    status.innerHTML = "📸 识别到指令：添加照片！";
+                    setTimeout(() => { 
+                        document.getElementById('file-input').click(); 
+                        status.style.color = "rgba(255, 215, 0, 0.7)";
+                        status.innerHTML = originalText;
+                    }, 500);
+                }
+            }
+            
+            // 3. 检测 "张开手" 或 "双指捏合" -> 变星球
+            // 计算拇指和食指距离
+            const dx = landmarks[4].x - landmarks[8].x;
+            const dy = landmarks[4].y - landmarks[8].y;
+            const pinchDist = Math.sqrt(dx*dx + dy*dy);
+            const isPinching = pinchDist < 0.05;
+
+            if (openFingersCount >= 3 || isPinching) {
+                isPlanet = true;
+            } else {
+                isPlanet = false;
+            }
+        }
+
+        // --- 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const time = clock.getElapsedTime();
+            controls.update();
+
+            // 1. 粒子变形逻辑 (Lerp 插值)
+            const positions = particles.geometry.attributes.position.array;
+            // 决定目标坐标数组
+            const targetPositions = isPlanet ? positionsPlanet : positionsTree;
+            
+            // 变形速度 (越大约快)
+            const morphSpeed = 0.05;
+
+            for(let i = 0; i < particleCount; i++) {
+                const px = positions[i*3];
+                const py = positions[i*3+1];
+                const pz = positions[i*3+2];
+                
+                const tx = targetPositions[i*3];
+                const ty = targetPositions[i*3+1];
+                const tz = targetPositions[i*3+2];
+
+                // 简单的平滑移动算法
+                positions[i*3]   += (tx - px) * morphSpeed;
+                positions[i*3+1] += (ty - py) * morphSpeed;
+                positions[i*3+2] += (tz - pz) * morphSpeed;
+                
+                // 如果是树形态，让粒子有个轻微的上下浮动，模拟呼吸
+                if(!isPlanet) {
+                    positions[i*3+1] += Math.sin(time * 2 + px) * 0.01;
+                }
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+
+            // 2. 装饰环动画
+            if(ringGroup) {
+                ringGroup.rotation.y += 0.005;
+                ringGroup.rotation.x = Math.sin(time * 0.5) * 0.2;
+                // 如果是星球模式，环放大
+                const targetScale = isPlanet ? 1.5 : 1;
+                ringGroup.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.05);
+            }
+
+            // 3. 照片跟随变形
+            updatePhotos(isPlanet);
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 辅助功能 ---
+
+        // 处理照片上传
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.src = e.target.result;
+                img.onload = () => addPhoto(img);
+            };
+            reader.readAsDataURL(file);
+            event.target.value = '';
+        }
+
+        function addPhoto(image) {
+            const texture = new THREE.Texture(image);
+            texture.needsUpdate = true;
+            const mat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+            const ratio = image.width / image.height;
+            const geo = new THREE.PlaneGeometry(1.5 * ratio, 1.5);
+            const mesh = new THREE.Mesh(geo, mat);
+
+            // 给照片添加金色边框
+            const borderGeo = new THREE.PlaneGeometry(1.5 * ratio + 0.1, 1.5 + 0.1);
+            const borderMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+            const border = new THREE.Mesh(borderGeo, borderMat);
+            border.position.z = -0.01;
+            mesh.add(border);
+
+            // 随机分配两个位置：树的位置 和 星球的位置
+            // 树位置
+            const tAngle = Math.random() * Math.PI * 2;
+            const tY = (Math.random() * 12) - 6;
+            const tR = (1 - (tY + 8)/16) * 6 + 1; // 简化的圆锥半径
+            const tPos = new THREE.Vector3(Math.cos(tAngle)*tR, tY, Math.sin(tAngle)*tR);
+
+            // 星球位置 (球面)
+            const pVec = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize().multiplyScalar(7.2);
+
+            // 存储在 userData 里方便动画更新
+            mesh.userData = {
+                treePos: tPos,
+                planetPos: pVec,
+                lookAtCenter: true
+            };
+            
+            // 初始设为当前状态位置
+            mesh.position.copy(isPlanet ? pVec : tPos);
+            mesh.lookAt(0, mesh.position.y, 0);
+
+            photoGroup.add(mesh);
+        }
+
+        function updatePhotos(isTargetPlanet) {
+            photoGroup.children.forEach(mesh => {
+                const target = isTargetPlanet ? mesh.userData.planetPos : mesh.userData.treePos;
+                
+                // 位置平滑过渡
+                mesh.position.lerp(target, 0.05);
+
+                // 朝向处理：始终背对圆心(即面向外部)
+                // 简单的 LookAt(0,0,0) 会让背面朝外，所以我们 LookAt 后再转 180度
+                mesh.lookAt(0, isTargetPlanet ? 0 : mesh.position.y, 0); 
+                mesh.rotateY(Math.PI);
+            });
+        }
+
+        function createSparkleTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(0.4, 'rgba(255, 215, 0, 0.5)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0,0,32,32);
+            return new THREE.Texture(canvas);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
